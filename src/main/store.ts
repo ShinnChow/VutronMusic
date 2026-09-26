@@ -57,6 +57,22 @@ export interface TypeElectronStore {
   plugins: {
     [key: string]: Record<string, any>
   }
+  security: {
+    /**
+     * 用户通过系统对话框显式授权过的目录。
+     *
+     * 注意：该键**不是** `settings.*` 的子键，渲染进程的 `setStoreSettings`
+     * 无法写入它（那里的 key 前缀固定为 `settings.`），因此可以作为文件系统
+     * 访问权限的可信来源（见 issue #416）。
+     */
+    grantedPaths: string[]
+    /**
+     * 用户通过「选择文件」对话框显式授权过的单个文件。
+     * 用于 `vutron://local-resource` / `vutron://local-asset` 读取单文件资源
+     * （自定义背景图片/视频、lottie 配置文件等）。
+     */
+    grantedFiles: string[]
+  }
 }
 
 const store = new Store<TypeElectronStore>({
@@ -184,7 +200,11 @@ const store = new Store<TypeElectronStore>({
         status: 'logout'
       }
     },
-    plugins: {}
+    plugins: {},
+    security: {
+      grantedPaths: [],
+      grantedFiles: []
+    }
   }
 })
 

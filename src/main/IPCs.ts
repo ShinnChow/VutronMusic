@@ -20,6 +20,11 @@ import { requestUserAuth, scrobbleTrack, updateNowPlaying } from './utils/lastfm
 import { pluginManager } from './pluginManager'
 import { PluginInstance } from './utils/pluginManager'
 import { initMap, osdMap, settingMap, statusMap } from '@/types/music'
+import { deleteScreenshot, saveScreenshot } from './utils/screenshotStore'
+import { grantFiles, grantPaths, isGrantedLocalResource, isGrantedPath } from './utils/pathGrants'
+import { isAllowedSettingKey, isPlainObject } from './utils/settingKeys'
+import { isExistingDirectory } from './utils/pathSafety'
+import { openExternalSafely } from './utils/windowHardening'
 
 let isLock = store.get('osdWin.isLock') as boolean
 let blockerId: number | null = null
@@ -127,20 +132,29 @@ function initWindowIpcMain(win: BrowserWindow | null): void {
 
 function initTrayIpcMain(win: BrowserWindow, tray: YPMTray, touchBar: YPMTouchBar | null): void {
   ipcMain.on('setStoreSettings', async (event: IpcMainEvent, data: Partial<settingMap>) => {
-    Object.entries(data).forEach(([key, value]) => {
-      store.set(`settings.${key}`, value)
-    })
+    if (!isPlainObject(data)) return
 
-    if (data.enableGlobalShortcut !== undefined) {
+    // 只写入白名单内的设置项（见 utils/settingKeys.ts，issue #416）
+    const accepted: Record<string, unknown> = {}
+    for (const [key, value] of Object.entries(data)) {
+      if (!isAllowedSettingKey(key)) {
+        log.warn(`[security] 已忽略未授权的设置项: ${key}`)
+        continue
+      }
+      accepted[key] = value
+      store.set(`settings.${key}`, value)
+    }
+
+    if (accepted.enableGlobalShortcut !== undefined) {
       const { globalShortcut } = await import('electron')
-      if (data.enableGlobalShortcut) {
+      if (accepted.enableGlobalShortcut) {
         registerGlobalShortcuts(win)
       } else {
         globalShortcut.unregisterAll()
       }
     }
 
-    if (data.shortcuts !== undefined) {
+    if (accepted.shortcuts !== undefined) {
       createMenu(win)
       const global = store.get('settings.enableGlobalShortcut') as boolean
       if (global) {
@@ -150,7 +164,7 @@ function initTrayIpcMain(win: BrowserWindow, tray: YPMTray, touchBar: YPMTouchBa
       }
     }
 
-    if (data.autoCacheTrack !== undefined) {
+    if (accepted.autoCacheTrack !== undefined) {
       const autoCache = (store.get('settings.autoCacheTrack.enable') as boolean) || false
       if (autoCache) {
         cacheWorker = createWorker('cacheTrack')
@@ -179,9 +193,9 @@ function initTrayIpcMain(win: BrowserWindow, tray: YPMTray, touchBar: YPMTouchBa
       }
     }
 
-    if (data.proxy !== undefined) {
+    if (accepted.proxy !== undefined) {
       const map = { 1: 'http', 2: 'https' }
-      const value = data.proxy
+      const value = accepted.proxy as { type: 0 | 1 | 2; address: string; port: number }
       if (value.type === 0) {
         win.webContents.session.setProxy({})
       } else {
@@ -190,8 +204,8 @@ function initTrayIpcMain(win: BrowserWindow, tray: YPMTray, touchBar: YPMTouchBa
       }
     }
 
-    tray.updateSetting(data)
-    touchBar?.updateSetting(data)
+    tray.updateSetting(accepted)
+    touchBar?.updateSetting(accepted)
   })
 }
 
@@ -387,10 +401,9 @@ async function initOtherIpcMain(win: BrowserWindow): Promise<void> {
     return Constants.APP_VERSION
   })
 
-  // Open url via web browser
-  ipcMain.on('msgOpenExternalLink', async (event: IpcMainEvent, url: string) => {
-    const { shell } = await import('electron')
-    await shell.openExternal(url)
+  // Open url via web browser（只允许 http/https/mailto，见 utils/windowHardening.ts）
+  ipcMain.on('msgOpenExternalLink', (event: IpcMainEvent, url: string) => {
+    openExternalSafely(url)
   })
 
   ipcMain.on('openLogFile', async () => {
@@ -412,17 +425,26 @@ async function initOtherIpcMain(win: BrowserWindow): Promise<void> {
       properties: ['openFile'],
       filters
     })
+    if (!dialogResult.canceled) {
+      grantFiles(dialogResult.filePaths)
+    }
     return dialogResult
   })
 
   ipcMain.handle('msgCheckFileExist', async (event, paths: string[]) => {
+    const list = Array.isArray(paths) ? paths : []
     const results = await Promise.all(
-      paths.map(async (path) => {
+      list.map(async (target) => {
+        // 只允许探测用户显式授权过的目录（issue #416：任意文件存在性 oracle）
+        if (typeof target !== 'string' || !isGrantedPath(target)) {
+          log.warn(`[security] 已拒绝探测未授权路径: ${String(target)}`)
+          return { path: String(target), exist: false, authorized: false }
+        }
         try {
-          await fs.promises.access(path)
-          return { path, exist: true }
+          await fs.promises.access(target)
+          return { path: target, exist: true, authorized: true }
         } catch {
-          return { path, exist: false }
+          return { path: target, exist: false, authorized: true }
         }
       })
     )
@@ -441,6 +463,8 @@ async function initOtherIpcMain(win: BrowserWindow): Promise<void> {
       properties: option
     })
     if (!result.canceled) {
+      // 用户通过原生对话框主动选择 = 显式授权
+      grantPaths(result.filePaths)
       return result.filePaths
     }
     return []
@@ -448,17 +472,40 @@ async function initOtherIpcMain(win: BrowserWindow): Promise<void> {
 
   ipcMain.handle('showOpenDialog', async (event, options) => {
     const { dialog } = await import('electron')
-    return await dialog.showOpenDialog(options)
+    const result = await dialog.showOpenDialog(options)
+    // 用户通过原生对话框主动选择 = 显式授权（目录 → 目录白名单，文件 → 文件白名单）
+    const properties = Array.isArray(options?.properties) ? options.properties : []
+    if (!result.canceled) {
+      if (properties.includes('openDirectory')) {
+        grantPaths(result.filePaths)
+      }
+      if (properties.includes('openFile')) {
+        grantFiles(result.filePaths)
+      }
+    }
+    return result
   })
 
   ipcMain.handle('getFilesInFolder', async (event, folderPath: string, extensions: string[]) => {
+    // 只允许枚举用户显式授权过的目录（issue #416：任意目录枚举）
+    if (!isGrantedPath(folderPath)) {
+      log.warn(`[security] 已拒绝枚举未授权目录: ${String(folderPath)}`)
+      throw new Error('FOLDER_NOT_AUTHORIZED')
+    }
+    if (!isExistingDirectory(folderPath)) return []
+
+    const allowedExtensions = (Array.isArray(extensions) ? extensions : []).filter(
+      (ext): ext is string => typeof ext === 'string' && /^[a-z0-9]{1,8}$/i.test(ext)
+    )
+
     try {
-      const files = fs.readdirSync(folderPath)
+      const resolvedFolder = path.resolve(folderPath)
+      const files = fs.readdirSync(resolvedFolder)
       const filteredFiles = files.filter((file: string) => {
         const ext = file.split('.').pop()?.toLowerCase()
-        return ext && extensions.includes(ext)
+        return ext && allowedExtensions.includes(ext)
       })
-      return filteredFiles.map((file: string) => path.join(folderPath, file))
+      return filteredFiles.slice(0, 5000).map((file: string) => path.join(resolvedFolder, file))
     } catch (error) {
       console.error('Error reading folder:', error)
       return []
@@ -496,9 +543,21 @@ async function initOtherIpcMain(win: BrowserWindow): Promise<void> {
       log.warn('扫描已在执行中，忽略重复请求')
       return
     }
+
+    // 只允许扫描用户显式授权过的目录（issue #416：任意目录枚举）
+    const requested = Array.isArray(data?.filePath) ? data.filePath : []
+    const grantedDirs = requested.filter((dir) => typeof dir === 'string' && isGrantedPath(dir))
+    if (grantedDirs.length !== requested.length) {
+      log.warn(`[security] 已忽略 ${requested.length - grantedDirs.length} 个未授权的扫描目录`)
+    }
+    if (!grantedDirs.length) {
+      log.warn('[security] 已拒绝本地扫描：没有任何已授权的目录')
+      return
+    }
+
     isScanningLocalMusic = true
     try {
-      const result = await scanLocalMusic(data.filePath, (progress) => {
+      const result = await scanLocalMusic(grantedDirs, (progress) => {
         win.webContents.send('scanLocalMusicProgress', progress)
       })
       win.webContents.send('scanLocalMusicDone', { hasNewData: result.hasNewData })
@@ -521,6 +580,11 @@ async function initOtherIpcMain(win: BrowserWindow): Promise<void> {
   })
 
   ipcMain.on('msgShowInFolder', async (event, path: string) => {
+    // 只允许在文件管理器中定位授权范围内的文件（issue #416）
+    if (!isGrantedLocalResource(path)) {
+      log.warn(`[security] 已拒绝定位未授权路径: ${String(path)}`)
+      return
+    }
     const { shell } = await import('electron')
     shell.showItemInFolder(path)
   })
@@ -763,37 +827,22 @@ async function initOtherIpcMain(win: BrowserWindow): Promise<void> {
     const image = await win.capturePage()
     const buffer = image.toPNG()
 
-    const userDataPath = app.getPath('userData')
-    const screenshotsDir = path.join(userDataPath, 'screenshots')
-
-    if (!fs.existsSync(screenshotsDir)) {
-      fs.mkdirSync(screenshotsDir, { recursive: true })
-    }
-
-    const fileName = `screenshot_${name}.png`
-    const filePath = path.join(screenshotsDir, fileName)
-
-    try {
-      fs.writeFileSync(filePath, buffer)
-      return filePath
-    } catch (err) {
-      console.error('保存失败:', err)
-      return ''
-    }
+    // 文件名与落盘目录的校验统一在 screenshotStore 内完成（防路径遍历）
+    return saveScreenshot(name, buffer)
   })
 
   ipcMain.on('delete-screenshot', (event, name: string) => {
-    try {
-      if (fs.existsSync(name)) {
-        fs.unlinkSync(name)
-      }
-    } catch (error) {
-      console.error('删除失败:', error)
-    }
+    // 只允许删除 userData/screenshots 下由本应用生成的主题截图
+    deleteScreenshot(name)
   })
 
   ipcMain.handle('get-cache-path', () => {
     return path.join(app.getPath('userData'), 'audioCache')
+  })
+
+  // 查询某个本地文件是否仍被授权读取（供渲染层在升级后提示用户重新选择）
+  ipcMain.handle('check-local-resource', (_event, target: string) => {
+    return isGrantedLocalResource(target)
   })
 }
 

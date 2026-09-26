@@ -1,7 +1,7 @@
 <template>
   <div
     v-if="latestVersion?.updateInfo?.releaseNotes"
-    v-same-html="latestVersion?.updateInfo?.releaseNotes || ''"
+    v-safe-html="latestVersion?.updateInfo?.releaseNotes || ''"
     class="update-release"
   ></div>
 </template>

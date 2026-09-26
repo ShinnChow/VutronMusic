@@ -30,6 +30,9 @@ import { registerGlobalShortcuts } from './globalShortcut'
 import { initAutoUpdater } from './checkUpdate'
 import log from './log'
 import { pluginManager } from './pluginManager'
+import { installIpcGuard } from './utils/ipcGuard'
+import { hardenWindow } from './utils/windowHardening'
+import { isGrantedLocalResource } from './utils/pathGrants'
 
 const closeOnLinux = (e: any, win: BrowserWindow | null) => {
   const closeOpt = store.get('settings.closeAppOption') || 'ask'
@@ -129,7 +132,19 @@ class BackGround {
     ])
 
     // create fastify app
-    this.fastifyApp = await this.createFastifyApp()
+    // 失败必须 fail-closed：如果 41830 已被其它进程占用，窗口会加载到不属于本应用
+    // 的内容（且 origin 相同，IPC 守卫无法识别），因此宁可退出也不能继续。
+    try {
+      this.fastifyApp = await this.createFastifyApp()
+    } catch (error) {
+      const message = `本地服务启动失败（端口 ${Constants.ELECTRON_WEB_SERVER_PORT} 可能已被占用）：${
+        (error as Error)?.message || error
+      }`
+      log.error(`[security] ${message}`)
+      dialog.showErrorBox(Constants.APP_NAME, message)
+      app.exit(1)
+      return
+    }
 
     this.handleAppEvents()
   }
@@ -149,12 +164,21 @@ class BackGround {
     server.register(netease)
     server.register(httpHandler)
     server.decorate('win', null)
+
+    // 纵深防御：给本地服务响应补上不会误伤功能的 CSP 与嗅探保护
+    server.addHook('onSend', async (_request, reply, payload) => {
+      reply.header('Content-Security-Policy', Constants.LOCAL_SERVER_CSP)
+      reply.header('X-Content-Type-Options', 'nosniff')
+      return payload
+    })
+
     const port = Number(
       Constants.IS_DEV_ENV
         ? Constants.ELECTRON_DEV_NETEASE_API_PORT || 40001
         : Constants.ELECTRON_WEB_SERVER_PORT || 41830
     )
-    await server.listen({ port })
+    // 显式只监听回环地址，避免在局域网网卡上暴露本地 API 与静态资源
+    await server.listen({ port, host: '127.0.0.1' })
     log.info(`AppServer is running at http://localhost:${port}`)
     return server
   }
@@ -219,6 +243,8 @@ class BackGround {
 
     this.win = new BrowserWindow(option)
     this.win.setMenuBarVisibility(false)
+    // 安全边界：锁定导航 + 登记可信 IPC 调用方，必须在 loadURL 之前完成
+    hardenWindow(this.win, 'main')
 
     if (Constants.IS_DEV_ENV) {
       await this.win.loadURL(Constants.APP_INDEX_URL_DEV)
@@ -296,6 +322,8 @@ class BackGround {
       }
     }
     this.lyricWin = new BrowserWindow(option)
+    // 安全边界：锁定导航 + 登记可信 IPC 调用方（仅限 OSD 专用通道）
+    hardenWindow(this.lyricWin, 'osd')
     await this.lyricWin.loadURL(Constants.APP_OSD_URL)
   }
 
@@ -433,6 +461,14 @@ class BackGround {
     protocol.handle('vutron', async (request) => {
       const { host, pathname, searchParams, search } = new URL(request.url)
 
+      // 安全边界：vutron:// 只服务于应用自身页面。
+      // 资源加载（img/video/audio）不带 Origin，跨源 fetch 一定带 Origin。
+      const requestOrigin = request.headers.get('Origin')
+      if (requestOrigin && requestOrigin !== Constants.APP_ORIGIN) {
+        log.warn(`[security] 已拒绝来自 ${requestOrigin} 的 vutron:// 请求: ${host}`)
+        return new Response('Forbidden', { status: 403 })
+      }
+
       if (host === 'get-default-pic') {
         const pic = fs.readFileSync(defaultImagePath)
         return new Response(new Uint8Array(pic))
@@ -441,6 +477,11 @@ class BackGround {
         return new Response(new Uint8Array(pic))
       } else if (host === 'get-pic-path') {
         const filePath = pathname.slice(1)
+        // 本地文件读取必须落在用户授权目录 / 授权文件 / 应用自身目录内
+        if (!isGrantedLocalResource(filePath)) {
+          log.warn(`[security] 已拒绝读取未授权的封面路径: ${filePath}`)
+          return new Response('Forbidden', { status: 403 })
+        }
         const track = { matched: false, filePath, album: { picUrl: 'vutron://get-default-pic' } }
 
         const result = await getPic(track)
@@ -480,6 +521,7 @@ class BackGround {
             try {
               let filePath = searchParams.get('path') || ''
               if (!filePath) {
+                // id 分支：路径来自数据库，可信
                 const trackId = searchParams.get('id') || ''
                 if (trackId) {
                   const row = db.sqlite
@@ -488,7 +530,12 @@ class BackGround {
                   if (row) filePath = row.filePath
                 }
               } else {
+                // path 分支：路径由渲染进程提供，必须落在授权范围内
                 filePath = decodeURIComponent(filePath)
+                if (!isGrantedLocalResource(filePath)) {
+                  log.warn(`[security] 已拒绝读取未授权的流资源: ${filePath}`)
+                  return new Response('Forbidden', { status: 403 })
+                }
               }
               if (!fs.existsSync(filePath)) {
                 return new Response('Not Found', { status: 404 })
@@ -539,6 +586,10 @@ class BackGround {
 
           case 'json':
             const jsonFile = searchParams.get('path')!
+            if (!isGrantedLocalResource(jsonFile)) {
+              log.warn(`[security] 已拒绝读取未授权的 json 资源: ${jsonFile}`)
+              return new Response('Forbidden', { status: 403 })
+            }
             if (!fs.existsSync(jsonFile)) {
               return new Response('Not Found', { status: 404 })
             }
@@ -560,6 +611,11 @@ class BackGround {
         let filePath = decodeURIComponent(pathname.slice(1))
         if (process.platform === 'win32' && filePath.match(/^\/[A-Za-z]:/)) {
           filePath = filePath.slice(1)
+        }
+        // 本地文件读取必须落在用户授权目录 / 授权文件 / 应用自身目录内
+        if (!isGrantedLocalResource(filePath)) {
+          log.warn(`[security] 已拒绝读取未授权的本地资源: ${filePath}`)
+          return new Response('Forbidden', { status: 403 })
         }
         if (!fs.existsSync(filePath)) {
           return new Response('Not Found', { status: 404 })
@@ -663,6 +719,9 @@ class BackGround {
   handleAppEvents() {
     this.handleProtocol()
     app.whenReady().then(async () => {
+      // 安全边界必须在任何 IPC 通道注册、任何窗口创建之前安装
+      installIpcGuard()
+
       this.createMainWindow().then(() => {
         // @ts-ignore
         this.fastifyApp.win = this.win

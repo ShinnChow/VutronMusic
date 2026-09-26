@@ -3,6 +3,7 @@ import { defineStore } from 'pinia'
 import { computed, reactive, ref, toRaw, watch, readonly } from 'vue'
 import { PluginResultSchema } from '@/types/schemas'
 import { useNormalStateStore } from './state'
+import i18n from '../plugins/i18n'
 import {
   service,
   PluginMethodCall,
@@ -731,8 +732,16 @@ export const usePluginMusic = defineStore(
       )) as {
         path: string
         exist: boolean
+        authorized: boolean
       }[]
-      const validDirs = existResults.filter((item) => item.exist).map((item) => item.path)
+      // 安全策略升级后，历史遗留的扫描目录不再被 main 侧授权，
+      // 需要用户重新选择一次（见 issue #416）
+      if (existResults.some((item) => !item.authorized)) {
+        showToast(i18n.global.t('toast.reauthRequired'))
+      }
+      const validDirs = existResults
+        .filter((item) => item.exist && item.authorized)
+        .map((item) => item.path)
       if (!validDirs.length) return
       scanning.value = true
 

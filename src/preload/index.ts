@@ -44,6 +44,7 @@ const mainAvailChannels: string[] = [
   'get-screenshot',
   'delete-screenshot',
   'get-cache-path',
+  'check-local-resource',
   'get-song-url',
   'plugin-method-call',
   'get-plugins',

@@ -163,6 +163,12 @@ export async function startInstance(win: BrowserWindow) {
   const instance = fastify({
     ignoreTrailingSlash: true
   })
+    // 注意：这里刻意保持 origin: '*'。
+    // Amuse 客户端通常是 OBS 的浏览器源（Chromium），其 origin 不是应用自身 origin，
+    // 收紧 CORS 会直接破坏该集成；而当前无法枚举其合法 origin。
+    // 已知代价：任意网站都能读取用户当前播放的曲目信息（仅曲名/歌手/进度）。
+    // 若要收紧，需要与 Amuse 客户端约定来源白名单或一次性 token。
+    // 见 docs/src/spec/architecture/security.md「已知遗留」。
     .register(cors, { origin: '*' })
     .register(async (fastify) => {
       fastify.get('/query', async () => {
@@ -170,7 +176,8 @@ export async function startInstance(win: BrowserWindow) {
       })
     })
 
-  await instance.listen({ port: amuseDefaultPort })
+  // 至少保证只在回环地址监听，不暴露到局域网
+  await instance.listen({ port: amuseDefaultPort, host: '127.0.0.1' })
   console.log(`AmuseServer is running at http://localhost:${amuseDefaultPort}`)
 
   return instance

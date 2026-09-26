@@ -137,6 +137,19 @@ src/
 
 数据库迁移逻辑已内置于 `db.ts`，不要手动恢复或修改 `migrate()` 调用。
 
+### 8. 不信任渲染进程入参
+
+渲染进程是不可信输入源。preload 的通道白名单只校验 channel 名，**不是**安全边界。
+
+- 新增窗口必须调用 `hardenWindow(win, kind)`（`src/main/utils/windowHardening.ts`）；
+- IPC 调用方校验由 `src/main/utils/ipcGuard.ts` 统一完成，不要绕过 `ipcMain` 守卫；
+- 渲染进程传来的路径必须经 `pathGrants` / `pathSafety` 授权与校验（原生对话框是唯一授权来源）；
+- 平台 UGC 一律按纯文本渲染，禁止 `v-html` / 直接写 `innerHTML`；确需富文本时复用
+  `v-safe-html` 指令（`src/renderer/main.ts`）；
+- 新增设置项必须加入 `src/main/utils/settingKeys.ts` 白名单。
+
+完整不变量与检查清单见 `docs/src/spec/architecture/security.md`。
+
 ## Agent 决策优先级
 
 1. 用户当前明确要求

@@ -595,7 +595,8 @@
     "removedFromPlaylist": "已從歌單中刪除",
     "deleteSuccess": "刪除成功",
     "deleteFailed": "刪除失敗",
-    "copySuccess": "複製成功"
+    "copySuccess": "複製成功",
+    "reauthRequired": "安全策略已升級，請重新選擇該檔案或資料夾"
   },
   "next": {
     "nowPlaying": "正在播放",

@@ -596,7 +596,8 @@
     "removedFromPlaylist": "Removed from playlist",
     "deleteSuccess": "Deleted successfully",
     "deleteFailed": "Deletion failed",
-    "copySuccess": "Copied successfully"
+    "copySuccess": "Copied successfully",
+    "reauthRequired": "Security policy updated — please re-select this file or folder"
   },
   "next": {
     "nowPlaying": "Now Playing",

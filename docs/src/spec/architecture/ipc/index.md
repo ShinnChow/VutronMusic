@@ -232,3 +232,35 @@ IPCs.initialize(win, tray, touchBar, mpris, lrc)
   ├── initPluginIpcMain.main()
   └── initSynchronizeIpcMain.main()
 ```
+
+## 🔒 IPC 安全边界（调用方校验）
+
+> 背景见 [issue #416](https://github.com/stark81/VutronMusic/issues/416)，
+> 完整不变量见 [安全边界与不变量](../security)。
+
+**preload 的通道白名单只校验 channel 名，不校验调用方**，因此它不是安全边界：
+preload 会在窗口当前承载的任意 origin 上重新执行。真正的边界在
+`src/main/utils/ipcGuard.ts`：
+
+`installIpcGuard()` 会包装 Electron 的 `ipcMain.on/handle`，因此
+`IPCs.ts` / `menu.ts` / `dock.ts` / `thumBar.ts` 的所有注册点都自动生效。每次调用校验：
+
+1. `event.senderFrame` 必须存在，且是该 webContents 的**主 frame**（子 iframe 拒绝）；
+2. 该 webContents 必须由 `hardenWindow()` 登记为可信窗口；
+3. frame URL 的 origin 必须等于 `Constants.APP_ORIGIN`；
+
+任一条不满足即拒绝（`handle` 返回 `null`，`on` 直接丢弃）并写 `log.warn`，日志前缀为 `[security]`。
+
+### 通道分级
+
+| 分级 | 常量 | 含义 |
+| --- | --- | --- |
+| 默认 | — | 主窗口与桌面歌词窗口（已登记）均可调用 |
+| 仅主窗口 | `MAIN_ONLY_CHANNELS` | 文件系统原语与敏感操作：`get-screenshot`、`delete-screenshot`、`getFilesInFolder`、`msgCheckFileExist`、`check-local-resource`、`msgScanLocalMusic`、`upload-plugin`、`setStoreSettings` |
+| 仅桌面歌词 | `OSD_ONLY_CHANNELS` | `from-osd`、`osd-start-resize`、`osd-stop-resize`、`set-ignore-mouse`、`mouseleave`、`get-seek`、`init-from-osd` |
+
+### 参数校验约定
+
+调用方校验只解决「谁能调用」，**不解决「参数是否合法」**。渲染进程传入的路径必须再经过
+`src/main/utils/pathGrants.ts` / `pathSafety.ts`（授权目录白名单、文件名清洗、目录包含性与
+realpath 校验），详见[安全边界与不变量](../security)。

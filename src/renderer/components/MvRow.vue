@@ -34,7 +34,7 @@
               item.name
             }}</router-link>
           </div>
-          <div v-same-html="getSubTitle(item)" class="artist"></div>
+          <div class="artist"><SubTextContent v-bind="getSubTitle(item)" /></div>
         </div>
       </div>
     </template>
@@ -44,9 +44,11 @@
 <script setup lang="ts">
 import { inject, onBeforeUnmount, onMounted, PropType, ref, toRefs } from 'vue'
 import VirtualList from './VirtualScrollNoHeight.vue'
+import SubTextContent from './SubTextContent.vue'
 import { useRouter } from 'vue-router'
 import { Mv } from '@/types/plugin'
 import { formatDate } from '../utils'
+import type { RouteLocationRaw } from 'vue-router'
 
 const props = defineProps({
   mvs: {
@@ -96,16 +98,32 @@ const goToMv = (mv: Mv) => {
   router.push(`/mv/${mv.pluginId}/${JSON.stringify(mv.sourceContext)}`)
 }
 
-const getSubTitle = (item: Mv) => {
+/**
+ * 副标题解析结果：艺人名（UGC）一律经 `text` 纯文本渲染，只有应用内跳转才产出 `to`。
+ * 不再拼接 HTML 字符串（见 issue #416），顺带修掉历史上的多余引号 `''>`。
+ */
+const getSubTitle = (item: Mv): { text: string; to?: RouteLocationRaw | null } => {
   if (props.subtitle === 'artist') {
     const artist = item.artists?.[0]
-    if (!artist) return ''
-    const artistName = artist.name
-    const sourceContext = JSON.stringify(artist.sourceContext)
-    return `<a href='/#/artist/${artist.pluginId}/${sourceContext}''>${artistName}</a>`
+    if (!artist) return { text: '' }
+    return {
+      text: artist.name ?? '',
+      // 缺少插件信息时不产出路由目标，避免生成无法解析的链接
+      to:
+        artist.pluginId && artist.sourceContext
+          ? {
+              name: 'ArtistPage',
+              params: {
+                pluginId: artist.pluginId,
+                sourceContext: JSON.stringify(artist.sourceContext)
+              }
+            }
+          : null
+    }
   } else if (props.subtitle === 'publishTime') {
-    return formatDate(item.publishTime, 'YYYY-MM-DD')
+    return { text: formatDate(item.publishTime, 'YYYY-MM-DD') }
   }
+  return { text: '' }
 }
 
 const updatePadding = inject('updatePadding') as (padding: number) => void

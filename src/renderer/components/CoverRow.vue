@@ -29,7 +29,7 @@
           }}</router-link>
         </div>
         <div v-show="type !== 'Artist' && subText !== 'none'" class="info">
-          <span v-same-html="getSubText(item)"></span>
+          <SubTextContent v-bind="getSubText(item)" />
         </div>
       </div>
     </div>
@@ -41,10 +41,12 @@ import { computed, PropType, ref } from 'vue'
 import Cover from './CoverBox.vue'
 import SvgIcon from './SvgIcon.vue'
 import ExplicitSymbol from './ExplicitSymbol.vue'
+import SubTextContent from './SubTextContent.vue'
 import { VueDraggable } from 'vue-draggable-plus'
 import { formatPlayCount } from '../utils'
 import { Album, Artist, PlaylistDetail } from '@/types/plugin'
 import { CoverType } from '@/types/music'
+import type { RouteLocationRaw } from 'vue-router'
 
 const props = defineProps({
   items: {
@@ -95,17 +97,41 @@ const isPrivacy = (item: any) => {
   return props.type === 'Playlist' && item.isPrivate
 }
 
-const getSubText = (item: any) => {
-  let subText = ''
-  if (props.subText === 'artist') {
-    subText = `<a href="/#/artist/${item.pluginId}/${JSON.stringify(item.sourceContext)}">${item.name}</a>`
-  } else if (props.subText === 'updateFrequency') {
-    subText = item.updateFrequency
-  } else if (props.subText === 'copywriter') {
-    subText = item.copywriter
-  } else if (props.subText === 'releaseYear') {
-    subText = new Date(item.createTime).getFullYear().toString()
-  } else if (props.subText === 'albumType+releaseYear') {
+/**
+ * 副标题解析结果。
+ *
+ * 注意：平台 UGC（专辑名 / 歌单简介等）一律通过 `text` 作为纯文本渲染，
+ * 只有指向应用内路由时才产出 `to`，绝不再拼接 HTML 字符串。
+ */
+const getSubText = (item: any): { text: string; to?: RouteLocationRaw | null } => {
+  const type = props.subText
+  if (type === 'artist') {
+    return {
+      text: item.name ?? '',
+      // 缺少插件信息时不产出路由目标，避免生成无法解析的链接
+      to:
+        item.pluginId && item.sourceContext
+          ? {
+              name: 'ArtistPage',
+              params: {
+                pluginId: item.pluginId,
+                sourceContext: JSON.stringify(item.sourceContext)
+              }
+            }
+          : null
+    }
+  }
+  if (type === 'updateFrequency') {
+    return { text: item.updateFrequency ?? '' }
+  }
+  if (type === 'copywriter') {
+    return { text: item.copywriter ?? '' }
+  }
+  if (type === 'releaseYear') {
+    const year = new Date(item.createTime).getFullYear()
+    return { text: Number.isFinite(year) ? year.toString() : '' }
+  }
+  if (type === 'albumType+releaseYear') {
     let albumType = item.type
     if (item.type === 'EP') {
       albumType = 'EP'
@@ -114,9 +140,10 @@ const getSubText = (item: any) => {
     } else if (item.type === '专辑') {
       albumType = 'Album'
     }
-    return `${albumType} · ${new Date(item.createTime).getFullYear()}`
+    const year = new Date(item.createTime).getFullYear()
+    return { text: Number.isFinite(year) ? `${albumType} · ${year}` : `${albumType}` }
   }
-  return subText
+  return { text: '' }
 }
 </script>
 

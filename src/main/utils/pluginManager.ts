@@ -13,6 +13,8 @@ import {
 } from '.'
 import { LyricLine } from '@/types/plugin'
 import type { PluginCapabilities } from '@/types/schemas'
+import log from '../log'
+import { isGrantedLocalResource, isGrantedPath } from './pathGrants'
 
 const dispatcher = new Agent({
   connections: 2,
@@ -169,10 +171,16 @@ export class PluginInstance {
       case 'LYRIC_EMBEDDED': {
         const embeddedFile = msg.filePath as string
         let embeddedLyric: LyricLine[] = []
-        try {
-          embeddedLyric = await getLyricFromEmbedded(embeddedFile)
-        } catch (e) {
-          console.error('[LYRIC_EMBEDDED error]', e)
+        // 插件运行在主进程的 Node 权限下，渲染层传来的路径必须先授权（issue #416）。
+        // 未授权时按「没有歌词」处理，避免暴露文件可读性。
+        if (!isGrantedLocalResource(embeddedFile)) {
+          log.warn(`[security] 已拒绝插件读取未授权的内嵌歌词文件: ${String(embeddedFile)}`)
+        } else {
+          try {
+            embeddedLyric = await getLyricFromEmbedded(embeddedFile)
+          } catch (e) {
+            console.error('[LYRIC_EMBEDDED error]', e)
+          }
         }
         this.worker.postMessage({
           type: 'LYRIC_RESPONSE',
@@ -185,9 +193,14 @@ export class PluginInstance {
       case 'LYRIC_PATH': {
         const pathFile = msg.filePath as string
         let pathLyric: LyricLine[] = []
-        try {
-          pathLyric = await getLyricFromPath(pathFile)
-        } catch {}
+        // 同上：只允许读取授权范围内的 .lrc 文件
+        if (!isGrantedLocalResource(pathFile)) {
+          log.warn(`[security] 已拒绝插件读取未授权的歌词文件: ${String(pathFile)}`)
+        } else {
+          try {
+            pathLyric = await getLyricFromPath(pathFile)
+          } catch {}
+        }
         this.worker.postMessage({
           type: 'LYRIC_RESPONSE',
           requestId: msg.requestId,
@@ -197,14 +210,20 @@ export class PluginInstance {
       }
 
       case 'CHECK_FILE_EXIST': {
-        const paths = msg.paths as string[]
+        const paths = Array.isArray(msg.paths) ? (msg.paths as unknown[]) : []
         const results = await Promise.all(
-          paths.map(async (filePath) => {
+          paths.map(async (target) => {
+            // 插件侧的存在性探测同样是「任意文件存在性 oracle」，
+            // 必须与 msgCheckFileExist 走同一套授权判定（issue #416）
+            if (typeof target !== 'string' || !isGrantedPath(target)) {
+              log.warn(`[security] 已拒绝插件探测未授权路径: ${String(target)}`)
+              return { path: String(target), exist: false, authorized: false }
+            }
             try {
-              await fs.promises.access(filePath)
-              return { path: filePath, exist: true }
+              await fs.promises.access(target)
+              return { path: target, exist: true, authorized: true }
             } catch {
-              return { path: filePath, exist: false }
+              return { path: target, exist: false, authorized: true }
             }
           })
         )

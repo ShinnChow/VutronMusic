@@ -41,7 +41,7 @@
             }}</router-link>
           </div>
           <div v-show="type !== 'Artist' && subText !== 'none'" class="info">
-            <span v-same-html="getSubText(item)"></span>
+            <SubTextContent v-bind="getSubText(item)" />
           </div>
         </div>
       </div>
@@ -55,10 +55,12 @@ import VirtualScroll from './VirtualScrollNoHeight.vue'
 import Cover from './CoverBox.vue'
 import SvgIcon from './SvgIcon.vue'
 import ExplicitSymbol from './ExplicitSymbol.vue'
+import SubTextContent from './SubTextContent.vue'
 import { usePluginMusic } from '../store/pluginMusic'
 import { formatPlayCount } from '../utils'
 import { Album, Artist, Playlist, PlaylistDetail } from '@/types/plugin'
 import { CoverType } from '@/types/music'
+import type { RouteLocationRaw } from 'vue-router'
 
 const props = defineProps({
   items: { type: Array as () => (Playlist | Artist | Album | PlaylistDetail)[], required: true },
@@ -94,20 +96,41 @@ const isExplicit = (item: any) => {
 const isPrivacy = (item: any) => {
   return props.type === 'Playlist' && item.isPrivate
 }
-const getSubText = (item: any) => {
-  let subText = ``
-  if (props.subText === 'artist') {
+/**
+ * 副标题解析结果：UGC 字段一律经 `text` 纯文本渲染，只有应用内跳转才产出 `to`。
+ * 不再拼接 HTML 字符串（见 issue #416）。
+ */
+const getSubText = (item: any): { text: string; to?: RouteLocationRaw | null } => {
+  const type = props.subText
+  if (type === 'artist') {
     const ar = item.artists?.[0] || null
-    subText = ar
-      ? `<a href='/artist/${ar.pluginId}/${JSON.stringify(ar.sourceContext)}'>${ar.name}</a>`
-      : ''
-  } else if (props.subText === 'updateFrequency') {
-    subText = item.updateFrequency
-  } else if (props.subText === 'copywriter') {
-    subText = item.copywriter
-  } else if (props.subText === 'releaseYear') {
-    subText = new Date(item.publishTime).getFullYear().toString()
-  } else if (props.subText === 'albumType+releaseYear') {
+    if (!ar) return { text: '' }
+    return {
+      text: ar.name ?? '',
+      // 缺少插件信息时不产出路由目标，避免生成无法解析的链接
+      to:
+        ar.pluginId && ar.sourceContext
+          ? {
+              name: 'ArtistPage',
+              params: {
+                pluginId: ar.pluginId,
+                sourceContext: JSON.stringify(ar.sourceContext)
+              }
+            }
+          : null
+    }
+  }
+  if (type === 'updateFrequency') {
+    return { text: item.updateFrequency ?? '' }
+  }
+  if (type === 'copywriter') {
+    return { text: item.copywriter ?? '' }
+  }
+  if (type === 'releaseYear') {
+    const year = new Date(item.publishTime).getFullYear()
+    return { text: Number.isFinite(year) ? year.toString() : '' }
+  }
+  if (type === 'albumType+releaseYear') {
     let albumType = item.type
     if (item.type === 'EP/Single') {
       albumType = item.size === 1 ? 'Single' : 'EP'
@@ -116,11 +139,13 @@ const getSubText = (item: any) => {
     } else if (item.type === '专辑') {
       albumType = 'Album'
     }
-    return `${albumType} · ${new Date(item.publishTime).getFullYear()}`
-  } else if (props.subText === 'creator') {
-    subText = `by ${item.creator.nickname}`
+    const year = new Date(item.publishTime).getFullYear()
+    return { text: Number.isFinite(year) ? `${albumType} · ${year}` : `${albumType}` }
   }
-  return subText
+  if (type === 'creator') {
+    return { text: item.creator?.nickname ? `by ${item.creator.nickname}` : '' }
+  }
+  return { text: '' }
 }
 </script>
 

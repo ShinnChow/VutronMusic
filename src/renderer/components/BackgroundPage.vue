@@ -41,14 +41,18 @@ import { ref, computed, watch, useTemplateRef, onMounted, nextTick, onUnmounted 
 import { Vue3Lottie } from 'vue3-lottie'
 import { usePlayerThemeStore } from '../store/playerTheme'
 import { usePlayerStore } from '../store/player'
+import { useNormalStateStore } from '../store/state'
 import { storeToRefs } from 'pinia'
 import { Vibrant } from 'node-vibrant/browser'
 import Color from 'color'
+import { useI18n } from 'vue-i18n'
 
 const playerThemeStore = usePlayerThemeStore()
 const { activeBG } = storeToRefs(playerThemeStore)
 const playerStore = usePlayerStore()
 const { playing, pic, currentTrack } = storeToRefs(playerStore)
+const { showToast } = useNormalStateStore()
+const { t } = useI18n()
 
 const videoRef = useTemplateRef('videoRef')
 const lottieContainer = useTemplateRef('lottieContainer')
@@ -65,12 +69,15 @@ const srcValue = computed(() => {
   } else if (['blur-image', 'dynamic-image', 'letter-image'].includes(activeBG.value.type)) {
     return `url(${pic.value})`
   } else if (activeBG.value.type === 'custom-image') {
+    if (!activeBG.value.src) return ''
     const image = `vutron://local-resource/${encodeURIComponent(activeBG.value.src)}`
     return `url(${image})`
   } else if (activeBG.value.type === 'custom-video') {
+    if (!activeBG.value.src) return ''
     return `vutron://local-asset?type=stream&path=${encodeURIComponent(activeBG.value.src)}`
   } else if (activeBG.value.type === 'lottie') {
     let src = activeBG.value.src
+    if (!src) return ''
     if (['snow', 'sunshine'].includes(src)) {
       src = new URL(`../assets/lottie/${src}.json`, import.meta.url).href
     } else {
@@ -133,7 +140,18 @@ const shouldPlayLottie = computed(() => {
 const loadRandomFolderSource = async () => {
   if (activeBG.value.type !== 'random-folder' || !activeBG.value.src) return
   const filters = ['png', 'jpg', 'jpeg', 'webp', 'gif', 'mp4', 'webm']
-  const files = await window.mainApi?.invoke('getFilesInFolder', activeBG.value.src, filters)
+  let files: string[] | undefined
+  try {
+    files = await window.mainApi?.invoke('getFilesInFolder', activeBG.value.src, filters)
+  } catch (error) {
+    // main 侧只会对「用户未显式授权过的目录」抛错：安全策略升级后需要重新选择
+    if (error instanceof Error && error.message.includes('FOLDER_NOT_AUTHORIZED')) {
+      showToast(t('toast.reauthRequired'))
+    } else {
+      console.error('读取背景文件夹失败:', error)
+    }
+    return
+  }
   if (files && files.length > 0) {
     const randomFile = files[Math.floor(Math.random() * files.length)]
     const type = randomFile.match(/\.(mp4|webm)$/i) ? 'custom-video' : 'custom-image'
@@ -142,6 +160,33 @@ const loadRandomFolderSource = async () => {
     tempType.value = type
   }
 }
+
+/**
+ * 自定义背景资源（图片 / 视频 / lottie 配置文件）需要用户显式授权才能读取。
+ * 安全策略升级后，历史选择过的文件不再被授权，这里主动提示用户重新选择，
+ * 避免背景静默失效。
+ */
+const reauthorizeCustomSource = async () => {
+  const { type, src } = activeBG.value
+  if (!['custom-image', 'custom-video', 'lottie'].includes(type) || !src) return
+  // lottie 内置动画不是本地文件
+  if (['snow', 'sunshine'].includes(src)) return
+  try {
+    const authorized = await window.mainApi?.invoke('check-local-resource', src)
+    if (authorized === false) {
+      activeBG.value.src = ''
+      showToast(t('toast.reauthRequired'))
+    }
+  } catch (error) {
+    console.error('校验背景资源授权失败:', error)
+  }
+}
+
+watch(
+  [() => activeBG.value.type, () => activeBG.value.src],
+  reauthorizeCustomSource,
+  { immediate: true }
+)
 
 const getImage = async (pic: string) => {
   if (!pic) return
